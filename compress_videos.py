@@ -128,12 +128,13 @@ def move_to_backup(file: Path) -> bool:
         return False
 
 
-def process_video(video: Path, base_folder: Path) -> str:
+def process_video(video: Path, base_folder: Path, current: int = 0, total: int = 0) -> str:
     """
     Process a single video file.
     Returns: 'skipped', 'success', or 'failed'
     """
-    print(f"\nProcessing: {video}")
+    progress = f"[{current}/{total}]" if total > 0 else ""
+    print(f"\n{progress} Processing: {video}")
 
     # Check if already encoded by us - only skip if we find our tag
     if has_encoder_tag(video):
@@ -222,21 +223,26 @@ def main():
 
     if args.dry_run:
         print("\n=== DRY RUN ===")
-        for video in videos:
+        total = len(videos)
+        for i, video in enumerate(videos, start=1):
             if has_encoder_tag(video):
                 status = "SKIP (already cq26)"
             else:
                 codec = get_video_codec(video)
                 status = f"ENCODE ({codec or 'unknown'})"
-            print(f"  {status}: {video}")
+            print(f"  [{i}/{total}] {status}: {video}")
         return
 
     # Process videos
     stats = {'success': 0, 'skipped': 0, 'failed': 0}
+    total = len(videos)
 
-    for video in videos:
-        result = process_video(video, folder)
+    for i, video in enumerate(videos, start=1):
+        result = process_video(video, folder, current=i, total=total)
         stats[result] += 1
+
+        # Show running totals
+        print(f"  Progress: {stats['success']} encoded, {stats['skipped']} skipped, {stats['failed']} failed")
 
     # Print summary
     print("\n" + "=" * 50)
