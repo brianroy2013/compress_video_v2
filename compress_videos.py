@@ -7,9 +7,12 @@ and moves originals to a backup location.
 """
 
 import argparse
+import json
+import logging
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Video extensions to process
@@ -20,6 +23,52 @@ BACKUP_BASE = Path('/home/brian/share/orig_video_to_delete')
 
 # Metadata tag to mark files we've encoded
 ENCODER_TAG = 'compressed_hevc_cq26'
+
+# Error log file location
+ERROR_LOG_FILE = Path('/home/brian/userfiles/claude/compres_video/compression_errors.log')
+
+# Configure logging
+error_logger = logging.getLogger('compression_errors')
+error_logger.setLevel(logging.ERROR)
+
+
+def setup_error_logging():
+    """Set up file handler for error logging."""
+    ERROR_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(ERROR_LOG_FILE, mode='a')
+    handler.setLevel(logging.ERROR)
+    formatter = logging.Formatter('%(message)s')
+    handler.setFormatter(formatter)
+    error_logger.addHandler(handler)
+
+
+def get_file_info(file: Path) -> dict:
+    """Get file information for error logging."""
+    info = {
+        'path': str(file),
+        'exists': file.exists(),
+    }
+    if file.exists():
+        stat = file.stat()
+        info['size_bytes'] = stat.st_size
+        info['size_mb'] = round(stat.st_size / (1024 * 1024), 2)
+        info['modified'] = datetime.fromtimestamp(stat.st_mtime).isoformat()
+    return info
+
+
+def log_error(error_type: str, file: Path, details: dict):
+    """Log an error with full context for debugging."""
+    error_entry = {
+        'timestamp': datetime.now().isoformat(),
+        'error_type': error_type,
+        'file_info': get_file_info(file),
+        'details': details,
+    }
+
+    # Write as formatted JSON for readability
+    error_logger.error("=" * 80)
+    error_logger.error(json.dumps(error_entry, indent=2))
+    error_logger.error("")
 
 
 def find_videos(folder: Path) -> list[Path]:
@@ -44,10 +93,26 @@ def get_video_codec(file: Path) -> str | None:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode == 0:
             return result.stdout.strip().lower()
+        else:
+            log_error('ffprobe_codec_detection', file, {
+                'command': ' '.join(cmd),
+                'returncode': result.returncode,
+                'stdout': result.stdout,
+                'stderr': result.stderr,
+            })
     except subprocess.TimeoutExpired:
         print(f"  Warning: ffprobe timed out for {file}")
+        log_error('ffprobe_timeout', file, {
+            'command': ' '.join(cmd),
+            'timeout_seconds': 30,
+        })
     except Exception as e:
         print(f"  Warning: Could not detect codec for {file}: {e}")
+        log_error('ffprobe_exception', file, {
+            'command': ' '.join(cmd),
+            'exception_type': type(e).__name__,
+            'exception_message': str(e),
+        })
     return None
 
 
@@ -83,9 +148,22 @@ def compress_video(input_file: Path, output_file: Path) -> bool:
             return True
         else:
             print(f"  ffmpeg error: {result.stderr[-500:] if len(result.stderr) > 500 else result.stderr}")
+            log_error('ffmpeg_encoding_failed', input_file, {
+                'command': ' '.join(cmd),
+                'output_file': str(output_file),
+                'returncode': result.returncode,
+                'stdout': result.stdout,
+                'stderr': result.stderr,
+            })
             return False
     except Exception as e:
         print(f"  ffmpeg exception: {e}")
+        log_error('ffmpeg_exception', input_file, {
+            'command': ' '.join(cmd),
+            'output_file': str(output_file),
+            'exception_type': type(e).__name__,
+            'exception_message': str(e),
+        })
         return False
 
 
@@ -108,6 +186,7 @@ def get_unique_path(path: Path) -> Path:
 
 def move_to_backup(file: Path) -> bool:
     """Move original file to backup location, preserving full path structure."""
+    backup_path = None
     try:
         # Use absolute path (without leading /) to preserve full directory structure
         # e.g., /home/brian/videos/foo.mp4 -> backup/home/brian/videos/foo.mp4
@@ -125,6 +204,12 @@ def move_to_backup(file: Path) -> bool:
         return True
     except Exception as e:
         print(f"  Failed to move to backup: {e}")
+        log_error('backup_move_failed', file, {
+            'backup_path': str(backup_path) if backup_path else None,
+            'backup_base': str(BACKUP_BASE),
+            'exception_type': type(e).__name__,
+            'exception_message': str(e),
+        })
         return False
 
 
@@ -178,6 +263,14 @@ def process_video(video: Path, base_folder: Path, current: int = 0, total: int =
         temp_file.rename(output_file)
     except Exception as e:
         print(f"  FAILED: Could not rename temp file: {e}")
+        log_error('temp_rename_failed', video, {
+            'temp_file': str(temp_file),
+            'output_file': str(output_file),
+            'temp_exists': temp_file.exists(),
+            'output_exists': output_file.exists(),
+            'exception_type': type(e).__name__,
+            'exception_message': str(e),
+        })
         return 'failed'
 
     print("  SUCCESS")
@@ -185,6 +278,8 @@ def process_video(video: Path, base_folder: Path, current: int = 0, total: int =
 
 
 def main():
+    setup_error_logging()
+
     parser = argparse.ArgumentParser(
         description='Recursively compress videos to HEVC and backup originals.'
     )
@@ -252,6 +347,9 @@ def main():
     print(f"  Skipped (already HEVC): {stats['skipped']}")
     print(f"  Failed: {stats['failed']}")
     print(f"  Total: {len(videos)}")
+
+    if stats['failed'] > 0:
+        print(f"\n  Error details logged to: {ERROR_LOG_FILE}")
 
 
 if __name__ == '__main__':
