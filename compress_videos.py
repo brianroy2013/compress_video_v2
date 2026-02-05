@@ -133,15 +133,26 @@ def has_encoder_tag(file: Path) -> bool:
     return False
 
 
-def compress_video(input_file: Path, output_file: Path) -> bool:
-    """Run ffmpeg HEVC encode. Returns True on success."""
-    cmd = [
-        'ffmpeg', '-y', '-i', str(input_file),
+def compress_video(input_file: Path, output_file: Path, input_codec: str | None = None) -> bool:
+    """Run ffmpeg HEVC encode. Returns True on success.
+
+    Uses GPU decoding (av1_cuvid) for AV1 files to avoid libdav1d bugs
+    and improve performance with full GPU pipeline.
+    """
+    # Build command with optional GPU decoder for AV1
+    cmd = ['ffmpeg', '-y']
+
+    # Use NVIDIA GPU decoder for AV1 files (avoids libdav1d assertion bug)
+    if input_codec == 'av1':
+        cmd.extend(['-c:v', 'av1_cuvid'])
+
+    cmd.extend([
+        '-i', str(input_file),
         '-c:v', 'hevc_nvenc', '-cq', '26', '-preset', 'p5',
         '-c:a', 'aac', '-b:a', '128k',
         '-metadata', f'comment={ENCODER_TAG}',
         str(output_file)
-    ]
+    ])
     try:
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0:
@@ -228,7 +239,8 @@ def process_video(video: Path, base_folder: Path, current: int = 0, total: int =
 
     # Will encode regardless of current codec
     codec = get_video_codec(video)
-    print(f"  Current codec: {codec or 'unknown'} -> re-encoding to HEVC CQ26")
+    decode_method = "GPU (av1_cuvid)" if codec == 'av1' else "CPU"
+    print(f"  Current codec: {codec or 'unknown'} -> re-encoding to HEVC CQ26 (decode: {decode_method})")
 
     # Determine output path (same location, .mp4 extension)
     output_file = video.with_suffix('.mp4')
@@ -242,8 +254,8 @@ def process_video(video: Path, base_folder: Path, current: int = 0, total: int =
 
     print(f"  Encoding to: {output_file.name}")
 
-    # Compress
-    if not compress_video(video, temp_file):
+    # Compress (pass codec for GPU decoding of AV1)
+    if not compress_video(video, temp_file, input_codec=codec):
         # Clean up temp file on failure
         if temp_file.exists():
             temp_file.unlink()
@@ -324,7 +336,8 @@ def main():
                 status = "SKIP (already cq26)"
             else:
                 codec = get_video_codec(video)
-                status = f"ENCODE ({codec or 'unknown'})"
+                gpu_note = " [GPU decode]" if codec == 'av1' else ""
+                status = f"ENCODE ({codec or 'unknown'}){gpu_note}"
             print(f"  [{i}/{total}] {status}: {video}")
         return
 
