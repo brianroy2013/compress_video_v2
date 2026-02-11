@@ -1,0 +1,4 @@
+compress.db
+__pycache__/
+test_output/
+*.pyc
