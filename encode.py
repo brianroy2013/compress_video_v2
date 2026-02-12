@@ -10,7 +10,8 @@ import subprocess
 from pathlib import Path
 
 BACKUP_BASE = Path('/home/brian/share/orig_video_to_delete')
-ENCODER_TAG = 'compressed_hevc_v2'
+ENCODER_TAG_V2 = 'compressed_hevc_v2'
+ENCODER_TAG = 'compressed_hevc_v3'
 MIN_SAVINGS_PCT = 5.0
 
 # GPU decoders by source codec
@@ -70,11 +71,69 @@ def ffprobe_info(file_path):
 
 
 def has_v2_tag(file_path):
-    """Check if file already has our v2 encoder tag."""
+    """Check if file has the v2 encoder tag."""
     info = ffprobe_info(file_path)
     if info and info.get('comment'):
-        return ENCODER_TAG in info['comment']
+        return ENCODER_TAG_V2 in info['comment']
     return False
+
+
+def remux_to_mp4(input_path):
+    """Remux a non-MP4 file to MP4 container without re-encoding.
+
+    Returns dict:
+        success: bool
+        output_path: Path to output (only if success)
+        error: str (only on failure)
+    """
+    input_path = Path(input_path)
+    final_path = input_path.parent / f'{input_path.stem}_compressed.mp4'
+
+    cmd = [
+        'ffmpeg', '-y',
+        '-i', str(input_path),
+        '-c', 'copy',
+        '-metadata', f'comment={ENCODER_TAG}',
+        str(final_path),
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        if result.returncode != 0:
+            _cleanup(final_path)
+            stderr_tail = result.stderr[-1000:] if len(result.stderr) > 1000 else result.stderr
+            return {'success': False, 'error': f'ffmpeg exit {result.returncode}: {stderr_tail}'}
+    except subprocess.TimeoutExpired:
+        _cleanup(final_path)
+        return {'success': False, 'error': 'ffmpeg remux timed out (1h)'}
+    except Exception as e:
+        _cleanup(final_path)
+        return {'success': False, 'error': str(e)}
+
+    if not final_path.exists():
+        return {'success': False, 'error': 'Remuxed output file not created'}
+
+    return {
+        'success': True,
+        'output_path': str(final_path),
+        'output_size': final_path.stat().st_size,
+    }
+
+
+def rename_skip(input_path):
+    """Rename a file to {stem}_skip.mp4 to mark it as skipped.
+
+    Returns the new path, or None on failure.
+    """
+    input_path = Path(input_path)
+    skip_path = input_path.parent / f'{input_path.stem}_skip.mp4'
+    if skip_path.exists():
+        skip_path = _unique_path(skip_path)
+    try:
+        input_path.rename(skip_path)
+        return str(skip_path)
+    except Exception:
+        return None
 
 
 def build_cmd(input_path, output_path, source_codec, target_cq, scale_filter=None):
@@ -116,12 +175,19 @@ def build_cmd(input_path, output_path, source_codec, target_cq, scale_filter=Non
     return cmd
 
 
-def encode_video(input_path, source_codec, target_cq, scale_filter=None):
+def encode_video(input_path, source_codec, target_cq, scale_filter=None, size_gate=True):
     """Encode a video file.
+
+    Args:
+        input_path: Source video file
+        source_codec: Source codec name (for GPU decoder selection)
+        target_cq: CQ value for hevc_nvenc
+        scale_filter: Optional scale filter string
+        size_gate: If True, reject output that doesn't save >= MIN_SAVINGS_PCT
 
     Returns dict:
         success: bool
-        output_path: Path to output (only if success and passed size gate)
+        temp_path/final_path: paths (only if success and passed size gate)
         output_size: int
         savings_pct: float
         passed_size_gate: bool
@@ -151,14 +217,14 @@ def encode_video(input_path, source_codec, target_cq, scale_filter=None):
         _cleanup(temp_file)
         return {'success': False, 'error': str(e)}
 
-    # Size gate
     if not temp_file.exists():
         return {'success': False, 'error': 'Output file not created'}
 
     output_size = temp_file.stat().st_size
     savings_pct = (1 - output_size / input_size) * 100 if input_size > 0 else 0
 
-    if savings_pct < MIN_SAVINGS_PCT:
+    # Size gate check
+    if size_gate and savings_pct < MIN_SAVINGS_PCT:
         _cleanup(temp_file)
         return {
             'success': True,
@@ -168,12 +234,9 @@ def encode_video(input_path, source_codec, target_cq, scale_filter=None):
             'error': None,
         }
 
-    # Output is in same directory as input, same name but .mp4
-    final_path = input_path.with_suffix('.mp4')
-
-    # If the input file IS already .mp4, we'll replace it after backup
-    # If there's a different file at that path, make it unique
-    if final_path != input_path and final_path.exists():
+    # Output uses _compressed.mp4 suffix
+    final_path = input_path.parent / f'{input_path.stem}_compressed.mp4'
+    if final_path.exists():
         final_path = _unique_path(final_path)
 
     return {
