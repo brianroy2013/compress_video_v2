@@ -54,9 +54,12 @@ def is_processable(path):
     return True
 
 
-def discover_files(folders):
-    """Walk folders and return list of candidate video files."""
-    candidates = []
+def discover_folders(folders):
+    """Walk folders and return sorted list of directories containing processable videos.
+
+    Only checks filenames/extensions — no ffprobe calls, so this is fast.
+    """
+    dirs_with_videos = set()
     for folder in folders:
         folder = Path(folder).resolve()
         if not folder.is_dir():
@@ -64,50 +67,24 @@ def discover_files(folders):
             continue
         for path in folder.rglob('*'):
             if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS and is_processable(path):
-                candidates.append(path)
-    candidates.sort()
-    return candidates
+                dirs_with_videos.add(path.parent)
+    return sorted(dirs_with_videos)
 
 
-# ─── run ─────────────────────────────────────────────────────────────────────
+def scan_folder(folder):
+    """Probe a single folder for processable videos (non-recursive).
 
-def cmd_run(args):
-    """Discover and process video files in one pass."""
-    folders = [Path(f).resolve() for f in args.folders]
-    for folder in folders:
-        if not folder.is_dir():
-            print(f'Error: {folder} is not a directory')
-            sys.exit(1)
-
-    dry_run = args.dry_run
-    batch = args.batch
-
-    # Optionally recover stale claims
-    if args.recover_stale and not dry_run:
-        recovered = claim.recover_stale(dry_run=False)
-        if recovered:
-            print(f'Recovered {len(recovered)} stale claims')
-            for cp, data in recovered:
-                print(f'  {data.get("video_path", cp)}')
-            print()
-
-    # Discover candidates
-    print('Discovering video files...')
-    candidates = discover_files(folders)
-    print(f'Found {len(candidates)} candidates')
-
-    if not candidates:
-        print('Nothing to process.')
-        return
-
-    # Probe and decide strategy for each candidate
-    print('Probing files...')
+    Runs ffprobe, checks claims, checks v2 tags, and decides strategy
+    for each file. Returns (work_items, skipped_claimed_count).
+    """
     work_items = []
     skipped_claimed = 0
 
-    for i, path in enumerate(candidates, 1):
-        if i % 200 == 0 or i == len(candidates):
-            print(f'  Probed {i}/{len(candidates)}...', flush=True)
+    for path in sorted(folder.iterdir()):
+        if not path.is_file() or path.suffix.lower() not in VIDEO_EXTENSIONS:
+            continue
+        if not is_processable(path):
+            continue
 
         # Skip already-claimed files
         if claim.is_claimed(str(path)):
@@ -142,185 +119,238 @@ def cmd_run(args):
             'ext': ext,
         })
 
-    if skipped_claimed:
-        print(f'  {skipped_claimed} files already claimed, skipping')
-
-    # Sort by size descending (process largest first)
+    # Sort by size descending within folder
     work_items.sort(key=lambda w: w['size'], reverse=True)
+    return work_items, skipped_claimed
 
-    # Apply batch limit
-    if batch:
-        work_items = work_items[:batch]
 
-    if not work_items:
-        print('No files to process.')
-        return
+def _process_work_item(w, stats, total_saved_bytes):
+    """Process a single work item. Returns updated total_saved_bytes."""
+    path = w['path']
+    decision = w['decision']
+    action = decision['action']
 
-    # Summarize plan
-    action_counts = {}
-    total_size = 0
-    for w in work_items:
-        action = w['decision']['action']
-        action_counts[action] = action_counts.get(action, 0) + 1
-        total_size += w['size']
+    print(f'  {human_size(w["size"])}  {w["info"]["codec"]}  {action}  {decision["reason"]}')
 
-    print(f'\n{len(work_items)} files to process ({human_size(total_size)}):')
-    for action, cnt in sorted(action_counts.items(), key=lambda x: -x[1]):
-        print(f'  {action:<15s} {cnt:>6d}')
-
-    if dry_run:
-        print(f'\n=== DRY RUN — showing first 50 ===')
-        for w in work_items[:50]:
-            d = w['decision']
-            ds = ' [4K->1080p]' if d['downscale_1080p'] else ''
-            sg = ' [size-gate]' if d.get('size_gate') else ''
-            cq = f' CQ{d["target_cq"]}' if d['target_cq'] else ''
-            print(f'  {d["action"]:<8s}{cq}{ds}{sg}  {human_size(w["size"]):>12s}  {w["path"].name}')
-            print(f'    {d["reason"]}')
-        if len(work_items) > 50:
-            print(f'  ... and {len(work_items) - 50} more')
-        return
-
-    # ── Process ──
-    print(f'\nMachine: {HOSTNAME}')
-    print(f'Processing {len(work_items)} files...\n')
-
-    stats = {'compressed': 0, 'remuxed': 0, 'skipped': 0, 'failed': 0, 'already_claimed': 0,
-             'skip_no_savings': 0}
-    total_saved_bytes = 0
-    start_time = time.time()
-
-    for i, w in enumerate(work_items, 1):
-        path = w['path']
-        decision = w['decision']
-        action = decision['action']
-        elapsed = time.time() - start_time
-        done = stats['compressed'] + stats['remuxed']
-        rate = done / elapsed * 3600 if elapsed > 0 and done > 0 else 0
-
-        print(f'[{i}/{len(work_items)}] {path.name}')
-        print(f'  {human_size(w["size"])}  {w["info"]["codec"]}  {action}  {decision["reason"]}')
-
-        # ── Skip actions: just rename ──
-        if action.startswith('skip_'):
-            new_path = encode.rename_skip(path)
-            if new_path:
-                print(f'  SKIP -> {Path(new_path).name}')
-                stats['skipped'] += 1
-            else:
-                print(f'  SKIP: rename failed')
-                stats['failed'] += 1
-            continue
-
-        # ── Remux / Encode: need to claim first ──
-        if not claim.claim_file(str(path)):
-            print(f'  SKIP: already claimed by another machine')
-            stats['already_claimed'] += 1
-            continue
-
-        # Verify file still exists
-        if not path.exists():
-            print(f'  SKIP: file no longer exists')
-            claim.release_claim(str(path))
+    # ── Skip actions: just rename ──
+    if action.startswith('skip_'):
+        new_path = encode.rename_skip(path)
+        if new_path:
+            print(f'  SKIP -> {Path(new_path).name}')
+            stats['skipped'] += 1
+        else:
+            print(f'  SKIP: rename failed')
             stats['failed'] += 1
-            continue
+        return total_saved_bytes
 
-        if action == 'remux':
-            # Remux: copy streams into MP4
-            t0 = time.time()
-            result = encode.remux_to_mp4(path)
-            remux_time = time.time() - t0
+    # ── Remux / Encode: need to claim first ──
+    if not claim.claim_file(str(path)):
+        print(f'  SKIP: already claimed by another machine')
+        stats['already_claimed'] += 1
+        return total_saved_bytes
 
-            if not result['success']:
-                print(f'  FAILED: {result["error"]}')
-                claim.release_claim(str(path))
-                stats['failed'] += 1
-                continue
+    # Verify file still exists
+    if not path.exists():
+        print(f'  SKIP: file no longer exists')
+        claim.release_claim(str(path))
+        stats['failed'] += 1
+        return total_saved_bytes
 
-            # Backup original (non-MP4 file)
-            backup_path = encode.move_to_backup(path)
-            if backup_path is None:
-                print(f'  FAILED: could not backup original')
-                encode._cleanup(result['output_path'])
-                claim.release_claim(str(path))
-                stats['failed'] += 1
-                continue
-
-            print(f'  REMUXED: {human_size(w["size"])} -> {human_size(result["output_size"])} '
-                  f'({remux_time:.0f}s)')
-            stats['remuxed'] += 1
-            claim.release_claim(str(path))
-            continue
-
-        # ── Encode ──
-        scale_filter = None
-        if decision['downscale_1080p']:
-            scale_filter = strategy.get_scale_filter(w['info']['width'], w['info']['height'])
-
-        use_size_gate = decision.get('size_gate', True)
-
+    if action == 'remux':
+        # Remux: copy streams into MP4
         t0 = time.time()
-        result = encode.encode_video(
-            path,
-            source_codec=w['info']['codec'],
-            target_cq=decision['target_cq'],
-            scale_filter=scale_filter,
-            size_gate=use_size_gate,
-        )
-        encode_time = time.time() - t0
+        result = encode.remux_to_mp4(path)
+        remux_time = time.time() - t0
 
         if not result['success']:
             print(f'  FAILED: {result["error"]}')
             claim.release_claim(str(path))
             stats['failed'] += 1
-            continue
+            return total_saved_bytes
 
-        if not result.get('passed_size_gate'):
-            # Only reachable when size_gate=True (MP4 sources)
-            print(f'  NO SAVINGS: {result["savings_pct"]:.1f}% (need {encode.MIN_SAVINGS_PCT}%)')
-            new_path = encode.rename_skip(path)
-            if new_path:
-                print(f'  -> {Path(new_path).name}')
-            stats['skip_no_savings'] += 1
-            claim.release_claim(str(path))
-            continue
-
-        # Backup original
+        # Backup original (non-MP4 file)
         backup_path = encode.move_to_backup(path)
         if backup_path is None:
             print(f'  FAILED: could not backup original')
-            encode._cleanup(result['temp_path'])
+            encode._cleanup(result['output_path'])
             claim.release_claim(str(path))
             stats['failed'] += 1
-            continue
+            return total_saved_bytes
 
-        # Finalize: rename temp -> final
-        if not encode.finalize(result['temp_path'], result['final_path']):
-            print(f'  FAILED: could not rename temp file')
-            claim.release_claim(str(path))
-            stats['failed'] += 1
-            continue
-
-        saved = w['size'] - result['output_size']
-        total_saved_bytes += saved
-        print(f'  OK: {human_size(w["size"])} -> {human_size(result["output_size"])} '
-              f'({result["savings_pct"]:.1f}% saved, {encode_time:.0f}s)')
-        stats['compressed'] += 1
+        print(f'  REMUXED: {human_size(w["size"])} -> {human_size(result["output_size"])} '
+              f'({remux_time:.0f}s)')
+        stats['remuxed'] += 1
         claim.release_claim(str(path))
+        return total_saved_bytes
 
-        # Running totals
-        done = stats['compressed'] + stats['remuxed']
-        print(f'  Running: {stats["compressed"]} encoded, {stats["remuxed"]} remuxed, '
-              f'{stats["skipped"]} skipped, {stats["skip_no_savings"]} no-savings, '
-              f'{stats["failed"]} failed | saved {human_size(total_saved_bytes)}')
-        if rate > 0:
-            print(f'  Rate: {rate:.1f} files/hr')
+    # ── Encode ──
+    scale_filter = None
+    if decision['downscale_1080p']:
+        scale_filter = strategy.get_scale_filter(w['info']['width'], w['info']['height'])
+
+    use_size_gate = decision.get('size_gate', True)
+
+    t0 = time.time()
+    result = encode.encode_video(
+        path,
+        source_codec=w['info']['codec'],
+        target_cq=decision['target_cq'],
+        scale_filter=scale_filter,
+        size_gate=use_size_gate,
+    )
+    encode_time = time.time() - t0
+
+    if not result['success']:
+        print(f'  FAILED: {result["error"]}')
+        claim.release_claim(str(path))
+        stats['failed'] += 1
+        return total_saved_bytes
+
+    if not result.get('passed_size_gate'):
+        # Only reachable when size_gate=True (MP4 sources)
+        print(f'  NO SAVINGS: {result["savings_pct"]:.1f}% (need {encode.MIN_SAVINGS_PCT}%)')
+        new_path = encode.rename_skip(path)
+        if new_path:
+            print(f'  -> {Path(new_path).name}')
+        stats['skip_no_savings'] += 1
+        claim.release_claim(str(path))
+        return total_saved_bytes
+
+    # Backup original
+    backup_path = encode.move_to_backup(path)
+    if backup_path is None:
+        print(f'  FAILED: could not backup original')
+        encode._cleanup(result['temp_path'])
+        claim.release_claim(str(path))
+        stats['failed'] += 1
+        return total_saved_bytes
+
+    # Finalize: rename temp -> final
+    if not encode.finalize(result['temp_path'], result['final_path']):
+        print(f'  FAILED: could not rename temp file')
+        claim.release_claim(str(path))
+        stats['failed'] += 1
+        return total_saved_bytes
+
+    saved = w['size'] - result['output_size']
+    total_saved_bytes += saved
+    print(f'  OK: {human_size(w["size"])} -> {human_size(result["output_size"])} '
+          f'({result["savings_pct"]:.1f}% saved, {encode_time:.0f}s)')
+    stats['compressed'] += 1
+    claim.release_claim(str(path))
+    return total_saved_bytes
+
+
+# ─── run ─────────────────────────────────────────────────────────────────────
+
+def cmd_run(args):
+    """Discover folders, then probe and process each folder on demand."""
+    folders = [Path(f).resolve() for f in args.folders]
+    for folder in folders:
+        if not folder.is_dir():
+            print(f'Error: {folder} is not a directory')
+            sys.exit(1)
+
+    dry_run = args.dry_run
+    batch = args.batch
+
+    # Optionally recover stale claims
+    if args.recover_stale and not dry_run:
+        recovered = claim.recover_stale(dry_run=False)
+        if recovered:
+            print(f'Recovered {len(recovered)} stale claims')
+            for cp, data in recovered:
+                print(f'  {data.get("video_path", cp)}')
+            print()
+
+    # Phase 1: Discover folders with processable videos (fast, no ffprobe)
+    print('Scanning for folders with video files...')
+    target_folders = discover_folders(folders)
+    print(f'Found {len(target_folders)} folders with processable videos')
+
+    if not target_folders:
+        print('Nothing to process.')
+        return
+
+    print(f'\nMachine: {HOSTNAME}')
+
+    stats = {'compressed': 0, 'remuxed': 0, 'skipped': 0, 'failed': 0, 'already_claimed': 0,
+             'skip_no_savings': 0}
+    total_saved_bytes = 0
+    total_processed = 0
+    start_time = time.time()
+
+    # Phase 2: Process folder by folder (probe each folder just before processing)
+    for fi, folder in enumerate(target_folders, 1):
+        if batch and total_processed >= batch:
+            break
+
+        print(f'\n--- Folder {fi}/{len(target_folders)}: {folder} ---')
+        print('  Probing files...')
+        work_items, skipped_claimed = scan_folder(folder)
+
+        if skipped_claimed:
+            print(f'  {skipped_claimed} files already claimed, skipping')
+
+        if not work_items:
+            print('  No files to process in this folder.')
+            continue
+
+        # Apply remaining batch limit
+        if batch:
+            remaining = batch - total_processed
+            work_items = work_items[:remaining]
+
+        # Summarize folder
+        action_counts = {}
+        folder_size = 0
+        for w in work_items:
+            action = w['decision']['action']
+            action_counts[action] = action_counts.get(action, 0) + 1
+            folder_size += w['size']
+
+        print(f'  {len(work_items)} files ({human_size(folder_size)}):')
+        for action, cnt in sorted(action_counts.items(), key=lambda x: -x[1]):
+            print(f'    {action:<15s} {cnt:>6d}')
+
+        if dry_run:
+            for w in work_items[:50]:
+                d = w['decision']
+                ds = ' [4K->1080p]' if d['downscale_1080p'] else ''
+                sg = ' [size-gate]' if d.get('size_gate') else ''
+                cq = f' CQ{d["target_cq"]}' if d['target_cq'] else ''
+                print(f'    {d["action"]:<8s}{cq}{ds}{sg}  {human_size(w["size"]):>12s}  {w["path"].name}')
+                print(f'      {d["reason"]}')
+            if len(work_items) > 50:
+                print(f'    ... and {len(work_items) - 50} more')
+            total_processed += len(work_items)
+            continue
+
+        # Process files in this folder
+        for i, w in enumerate(work_items, 1):
+            total_processed += 1
+            elapsed = time.time() - start_time
+            done = stats['compressed'] + stats['remuxed']
+            rate = done / elapsed * 3600 if elapsed > 0 and done > 0 else 0
+
+            print(f'  [{i}/{len(work_items)}] {w["path"].name}')
+            total_saved_bytes = _process_work_item(w, stats, total_saved_bytes)
+
+            # Running totals after encode/remux
+            done = stats['compressed'] + stats['remuxed']
+            if done > 0:
+                print(f'  Running: {stats["compressed"]} encoded, {stats["remuxed"]} remuxed, '
+                      f'{stats["skipped"]} skipped, {stats["skip_no_savings"]} no-savings, '
+                      f'{stats["failed"]} failed | saved {human_size(total_saved_bytes)}')
+                if rate > 0:
+                    print(f'  Rate: {rate:.1f} files/hr')
 
     # Final summary
     elapsed = time.time() - start_time
     print(f'\n{"="*60}')
     print(f'RUN COMPLETE ({HOSTNAME})')
     print(f'{"="*60}')
+    print(f'  Folders scanned: {len(target_folders)}')
     print(f'  Encoded:         {stats["compressed"]}')
     print(f'  Remuxed:         {stats["remuxed"]}')
     print(f'  Skipped:         {stats["skipped"]}')
