@@ -333,7 +333,7 @@ def cmd_run(args):
             done = stats['compressed'] + stats['remuxed']
             rate = done / elapsed * 3600 if elapsed > 0 and done > 0 else 0
 
-            print(f'  [{i}/{len(work_items)}] {w["path"].name}')
+            print(f'  [{i}/{len(work_items)}] {w["path"]}')
             total_saved_bytes = _process_work_item(w, stats, total_saved_bytes)
 
             # Running totals after encode/remux
