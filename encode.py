@@ -1,7 +1,7 @@
 """
 FFmpeg encoding pipeline.
 
-Handles GPU-accelerated HEVC encoding, size gating, and backup management.
+Handles GPU-accelerated H.264 encoding, size gating, and backup management.
 """
 
 import json
@@ -11,7 +11,8 @@ from pathlib import Path
 
 BACKUP_BASE = Path('/home/brian/share/orig_video_to_delete')
 ENCODER_TAG_V2 = 'compressed_hevc_v2'
-ENCODER_TAG = 'compressed_hevc_v3'
+ENCODER_TAG_V3 = 'compressed_hevc_v3'
+ENCODER_TAG = 'compressed_h264_v4'
 MIN_SAVINGS_PCT = 5.0
 
 # GPU decoders by source codec
@@ -143,7 +144,7 @@ def build_cmd(input_path, output_path, source_codec, target_cq, scale_filter=Non
         input_path: Source video file
         output_path: Temp output file
         source_codec: Source codec name (for GPU decoder selection)
-        target_cq: CQ value for hevc_nvenc
+        target_cq: CQ value for h264_nvenc
         scale_filter: Optional scale filter string (e.g. 'scale=-2:1080')
 
     Returns:
@@ -159,7 +160,8 @@ def build_cmd(input_path, output_path, source_codec, target_cq, scale_filter=Non
     cmd.extend(['-i', str(input_path)])
 
     # Video encoder
-    cmd.extend(['-c:v', 'hevc_nvenc', '-cq', str(target_cq), '-preset', 'p5'])
+    cmd.extend(['-c:v', 'h264_nvenc', '-cq', str(target_cq), '-preset', 'p4'])
+    cmd.extend(['-r', '30'])
 
     # Scale filter for 4K downscale
     if scale_filter:
@@ -171,6 +173,9 @@ def build_cmd(input_path, output_path, source_codec, target_cq, scale_filter=Non
     # Metadata tag
     cmd.extend(['-metadata', f'comment={ENCODER_TAG}'])
 
+    # Fast start for streaming
+    cmd.extend(['-movflags', '+faststart'])
+
     cmd.append(str(output_path))
     return cmd
 
@@ -181,7 +186,7 @@ def encode_video(input_path, source_codec, target_cq, scale_filter=None, size_ga
     Args:
         input_path: Source video file
         source_codec: Source codec name (for GPU decoder selection)
-        target_cq: CQ value for hevc_nvenc
+        target_cq: CQ value for h264_nvenc
         scale_filter: Optional scale filter string
         size_gate: If True, reject output that doesn't save >= MIN_SAVINGS_PCT
 
@@ -234,10 +239,14 @@ def encode_video(input_path, source_codec, target_cq, scale_filter=None, size_ga
             'error': None,
         }
 
-    # Output uses _compressed.mp4 suffix
-    final_path = input_path.parent / f'{input_path.stem}_compressed.mp4'
-    if final_path.exists():
-        final_path = _unique_path(final_path)
+    # If input already has _compressed in the name, keep the same name
+    # (avoids video_compressed_compressed.mp4)
+    if '_compressed' in input_path.stem:
+        final_path = input_path
+    else:
+        final_path = input_path.parent / f'{input_path.stem}_compressed.mp4'
+        if final_path.exists():
+            final_path = _unique_path(final_path)
 
     return {
         'success': True,

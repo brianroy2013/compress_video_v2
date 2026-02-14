@@ -1,6 +1,6 @@
 # Video Compression v3
 
-GPU-accelerated video compression tool using HEVC (H.265) encoding via NVIDIA NVENC. Designed for batch processing large video libraries across multiple machines on a NAS.
+GPU-accelerated video compression tool using H.264 encoding via NVIDIA NVENC. Designed for batch processing large video libraries across multiple machines on a NAS.
 
 ## How It Works
 
@@ -12,7 +12,7 @@ Instead of a database, the system uses **filename conventions** to track state:
 | `_skip.mp4` | Skipped (already efficient, too small, or no savings from re-encoding) |
 | *(no suffix)* | Not yet processed |
 
-Re-running is always safe — files with `_compressed` or `_skip` in the name are automatically ignored.
+Re-running is always safe — files with `_skip` in the name are ignored, and files already tagged `compressed_h264_v4` are skipped. Old HEVC `_compressed` files without the new tag will be re-encoded to H.264.
 
 ## Commands
 
@@ -44,15 +44,14 @@ python3 compress_v3.py run /home/brian/share/videos --recover-stale
 
 | File Type | Action |
 |-----------|--------|
-| Non-MP4 HEVC/AV1 (non-4K) | Remux to MP4 (no re-encoding, fast) |
-| Non-MP4 HEVC/AV1 (4K) | Encode + downscale to 1080p |
-| Non-MP4 other codec | Encode to HEVC MP4 |
-| MP4 4K (any codec) | Encode + downscale to 1080p |
-| MP4 HEVC (non-4K) | Skip (rename to `_skip.mp4`) |
-| MP4 AV1 (non-4K) | Skip (rename to `_skip.mp4`) |
+| Non-MP4 4K (any codec) | Encode to H.264 + downscale to 1080p |
+| Non-MP4 non-4K (any codec) | Encode to H.264 MP4 |
+| MP4 4K (any codec) | Encode to H.264 + downscale to 1080p |
+| MP4 HEVC (non-4K) | Encode to H.264 (compatibility) |
+| MP4 AV1 (non-4K) | Encode to H.264 (compatibility) |
 | MP4 H.264 < 0.5 Mbps | Skip (rename to `_skip.mp4`) |
-| MP4 H.264 >= 0.5 Mbps | Encode to HEVC (must save >= 5% or becomes `_skip`) |
-| MP4 VP9/other | Encode to HEVC (must save >= 5% or becomes `_skip`) |
+| MP4 H.264 >= 0.5 Mbps | Encode to H.264 (must save >= 5% or becomes `_skip`) |
+| MP4 VP9/other | Encode to H.264 (must save >= 5% or becomes `_skip`) |
 
 Files are processed largest-first. Originals are moved to `/home/brian/share/orig_video_to_delete/` as a backup.
 

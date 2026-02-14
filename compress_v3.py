@@ -39,7 +39,7 @@ def is_processable(path):
     """Check if a file should be considered for processing.
 
     Skips files that:
-    - Have _compressed or _skip in the stem
+    - Have _skip in the stem
     - Are hidden (start with .)
     - Are temp files (.tmp)
     """
@@ -49,7 +49,7 @@ def is_processable(path):
         return False
     if '.tmp' in name.lower():
         return False
-    if '_compressed' in stem or '_skip' in stem:
+    if '_skip' in stem:
         return False
     return True
 
@@ -95,9 +95,9 @@ def scan_folder(folder):
         if info is None:
             continue
 
-        # Check for v2 tag — treat as already done
-        has_tag = encode.ENCODER_TAG_V2 in (info.get('comment') or '')
-        if has_tag:
+        # Skip files already encoded with current H.264 settings
+        comment = info.get('comment') or ''
+        if encode.ENCODER_TAG in comment:  # compressed_h264_v4
             continue
 
         ext = path.suffix.lower()

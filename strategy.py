@@ -49,22 +49,21 @@ def decide_action(codec, bitrate, width, height, has_v2_tag=False, ext='.mp4'):
     """Decide what to do with a video.
 
     Returns a dict with keys:
-        action: 'encode', 'remux', 'skip_hevc', 'skip_av1', 'skip_tiny', 'skip_tagged'
+        action: 'encode', 'skip_tiny', 'skip_tagged'
         target_cq: int or None
         downscale_1080p: bool
         reason: human-readable explanation
         size_gate: bool — whether output must pass the size gate
 
-    Strategy (v3):
-        Non-MP4 HEVC/AV1 non-4K  -> remux (copy streams to MP4), no size gate
-        Non-MP4 HEVC/AV1 4K      -> encode + downscale, no size gate
-        Non-MP4 other codec       -> encode to HEVC MP4, no size gate
-        MP4 any 4K                -> encode + downscale, size gate
-        MP4 HEVC non-4K           -> skip
-        MP4 AV1 non-4K            -> skip
+    Strategy (v4 — H.264 target):
+        Non-MP4 4K (any codec)    -> encode H.264 + downscale, no size gate
+        Non-MP4 non-4K            -> encode H.264, no size gate
+        MP4 any 4K                -> encode H.264 + downscale, size gate
+        MP4 HEVC non-4K           -> encode H.264, no size gate (compatibility)
+        MP4 AV1 non-4K            -> encode H.264, no size gate (compatibility)
         MP4 H.264 < 0.5 Mbps     -> skip (tiny)
-        MP4 H.264 >= 0.5 Mbps    -> encode, size gate
-        MP4 VP9/other             -> encode, size gate
+        MP4 H.264 >= 0.5 Mbps    -> encode H.264, size gate
+        MP4 VP9/other             -> encode H.264, size gate
     """
     if has_v2_tag:
         return {
@@ -79,34 +78,22 @@ def decide_action(codec, bitrate, width, height, has_v2_tag=False, ext='.mp4'):
     bitrate_mbps = (bitrate or 0) / 1_000_000
     mp4 = (ext or '').lower() == '.mp4'
 
-    # ── Non-MP4 files: always convert to MP4 ──
+    # ── Non-MP4 files: always encode to H.264 MP4 ──
     if not mp4:
         if is_4k(width, height):
-            # 4K non-MP4: encode + downscale regardless of codec
             return {
                 'action': 'encode',
-                'target_cq': 26,
+                'target_cq': 30,
                 'downscale_1080p': True,
                 'size_gate': False,
-                'reason': f'Non-MP4 4K {width}x{height} -> encode + downscale',
+                'reason': f'Non-MP4 4K {width}x{height} -> encode H.264 + downscale',
             }
-        if codec_lower in ('hevc', 'av1'):
-            # Already efficient codec, just remux into MP4 container
-            return {
-                'action': 'remux',
-                'target_cq': None,
-                'downscale_1080p': False,
-                'size_gate': False,
-                'reason': f'Non-MP4 {codec_lower.upper()} -> remux to MP4',
-            }
-        # Other codec in non-MP4: encode to HEVC
-        cq = 28 if codec_lower != 'vp9' else 30
         return {
             'action': 'encode',
-            'target_cq': cq,
+            'target_cq': 30,
             'downscale_1080p': False,
             'size_gate': False,
-            'reason': f'Non-MP4 {codec_lower} -> encode to HEVC MP4',
+            'reason': f'Non-MP4 {codec_lower} -> encode to H.264 MP4',
         }
 
     # ── MP4 files ──
@@ -115,17 +102,17 @@ def decide_action(codec, bitrate, width, height, has_v2_tag=False, ext='.mp4'):
     if is_4k(width, height):
         return {
             'action': 'encode',
-            'target_cq': 26,
+            'target_cq': 30,
             'downscale_1080p': True,
             'size_gate': True,
-            'reason': f'4K {width}x{height} -> downscale to 1080p',
+            'reason': f'4K {width}x{height} -> H.264 + downscale to 1080p',
         }
 
     if codec_lower == 'h264':
         if bitrate_mbps >= 2:
             return {
                 'action': 'encode',
-                'target_cq': 28,
+                'target_cq': 30,
                 'downscale_1080p': False,
                 'size_gate': True,
                 'reason': f'H.264 at {bitrate_mbps:.1f} Mbps (high)',
@@ -149,20 +136,20 @@ def decide_action(codec, bitrate, width, height, has_v2_tag=False, ext='.mp4'):
 
     if codec_lower == 'hevc':
         return {
-            'action': 'skip_hevc',
-            'target_cq': None,
+            'action': 'encode',
+            'target_cq': 30,
             'downscale_1080p': False,
             'size_gate': False,
-            'reason': 'Already HEVC MP4, non-4K',
+            'reason': 'HEVC MP4 -> encode to H.264 (compatibility)',
         }
 
     if codec_lower == 'av1':
         return {
-            'action': 'skip_av1',
-            'target_cq': None,
+            'action': 'encode',
+            'target_cq': 30,
             'downscale_1080p': False,
             'size_gate': False,
-            'reason': 'Already AV1 MP4, non-4K',
+            'reason': 'AV1 MP4 -> encode to H.264 (compatibility)',
         }
 
     if codec_lower == 'vp9':
@@ -171,14 +158,14 @@ def decide_action(codec, bitrate, width, height, has_v2_tag=False, ext='.mp4'):
             'target_cq': 30,
             'downscale_1080p': False,
             'size_gate': True,
-            'reason': 'VP9 -> HEVC',
+            'reason': 'VP9 -> H.264',
         }
 
     # Fallback for other codecs (mpeg4, msmpeg4v3, etc.)
     return {
         'action': 'encode',
-        'target_cq': 28,
+        'target_cq': 30,
         'downscale_1080p': False,
         'size_gate': True,
-        'reason': f'{codec_lower} -> HEVC',
+        'reason': f'{codec_lower} -> H.264',
     }
