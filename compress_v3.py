@@ -2,9 +2,7 @@
 """
 Video Compression v3 - Filesystem-based tracking (no database).
 
-File naming conventions replace the database:
-    {stem}_compressed.mp4  — successfully compressed/converted
-    {stem}_skip.mp4        — skipped (strategy decision or failed size gate)
+Files are tracked by metadata tag (compressed_h264_v4) in the comment field.
 
 Subcommands:
     run [folders...]        Discover + process in one pass
@@ -39,17 +37,13 @@ def is_processable(path):
     """Check if a file should be considered for processing.
 
     Skips files that:
-    - Have _skip in the stem
     - Are hidden (start with .)
     - Are temp files (.tmp)
     """
     name = path.name
-    stem = path.stem.lower()
     if name.startswith('.'):
         return False
     if '.tmp' in name.lower():
-        return False
-    if '_skip' in stem:
         return False
     return True
 
@@ -132,17 +126,6 @@ def _process_work_item(w, stats, total_saved_bytes):
 
     print(f'  {human_size(w["size"])}  {w["info"]["codec"]}  {action}  {decision["reason"]}')
 
-    # ── Skip actions: just rename ──
-    if action.startswith('skip_'):
-        new_path = encode.rename_skip(path)
-        if new_path:
-            print(f'  SKIP -> {Path(new_path).name}')
-            stats['skipped'] += 1
-        else:
-            print(f'  SKIP: rename failed')
-            stats['failed'] += 1
-        return total_saved_bytes
-
     # ── Remux / Encode: need to claim first ──
     if not claim.claim_file(str(path)):
         print(f'  SKIP: already claimed by another machine')
@@ -216,9 +199,10 @@ def _process_work_item(w, stats, total_saved_bytes):
     if not result.get('passed_size_gate'):
         # Only reachable when size_gate=True (MP4 sources)
         print(f'  NO SAVINGS: {result["savings_pct"]:.1f}% (need {encode.MIN_SAVINGS_PCT}%)')
-        new_path = encode.rename_skip(path)
-        if new_path:
-            print(f'  -> {Path(new_path).name}')
+        if encode.tag_file(path):
+            print(f'  Tagged with {encode.ENCODER_TAG}')
+        else:
+            print(f'  WARNING: failed to tag file')
         stats['skip_no_savings'] += 1
         claim.release_claim(str(path))
         return total_saved_bytes
@@ -281,7 +265,7 @@ def cmd_run(args):
 
     print(f'\nMachine: {HOSTNAME}')
 
-    stats = {'compressed': 0, 'remuxed': 0, 'skipped': 0, 'failed': 0, 'already_claimed': 0,
+    stats = {'compressed': 0, 'remuxed': 0, 'failed': 0, 'already_claimed': 0,
              'skip_no_savings': 0}
     total_saved_bytes = 0
     total_processed = 0
@@ -347,7 +331,7 @@ def cmd_run(args):
             done = stats['compressed'] + stats['remuxed']
             if done > 0:
                 print(f'  Running: {stats["compressed"]} encoded, {stats["remuxed"]} remuxed, '
-                      f'{stats["skipped"]} skipped, {stats["skip_no_savings"]} no-savings, '
+                      f'{stats["skip_no_savings"]} no-savings, '
                       f'{stats["failed"]} failed | saved {human_size(total_saved_bytes)}')
                 if rate > 0:
                     print(f'  Rate: {rate:.1f} files/hr')
@@ -360,7 +344,6 @@ def cmd_run(args):
     print(f'  Folders scanned: {len(target_folders)}')
     print(f'  Encoded:         {stats["compressed"]}')
     print(f'  Remuxed:         {stats["remuxed"]}')
-    print(f'  Skipped:         {stats["skipped"]}')
     print(f'  No savings:      {stats["skip_no_savings"]}')
     print(f'  Failed:          {stats["failed"]}')
     print(f'  Already claimed: {stats["already_claimed"]}')
@@ -378,8 +361,8 @@ def cmd_status(args):
             print(f'Error: {folder} is not a directory')
             sys.exit(1)
 
-    counts = {'compressed': 0, 'skip': 0, 'remaining': 0, 'claimed': 0}
-    sizes = {'compressed': 0, 'skip': 0, 'remaining': 0}
+    counts = {'compressed': 0, 'remaining': 0, 'claimed': 0}
+    sizes = {'compressed': 0, 'remaining': 0}
 
     for folder in folders:
         for path in folder.rglob('*'):
@@ -394,11 +377,7 @@ def cmd_status(args):
             except OSError:
                 continue
 
-            stem = path.stem.lower()
-            if '_skip' in stem:
-                counts['skip'] += 1
-                sizes['skip'] += size
-            elif claim.is_claimed(str(path)):
+            if claim.is_claimed(str(path)):
                 counts['claimed'] += 1
             else:
                 # Check metadata tag to distinguish compressed from remaining
@@ -414,7 +393,6 @@ def cmd_status(args):
     total = sum(counts.values())
     print(f'Video files: {total}')
     print(f'  Compressed:  {counts["compressed"]:>6d}  ({human_size(sizes["compressed"])})')
-    print(f'  Skipped:     {counts["skip"]:>6d}  ({human_size(sizes["skip"])})')
     print(f'  In progress: {counts["claimed"]:>6d}')
     print(f'  Remaining:   {counts["remaining"]:>6d}  ({human_size(sizes["remaining"])})')
 

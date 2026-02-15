@@ -49,7 +49,7 @@ def decide_action(codec, bitrate, width, height, has_v2_tag=False, ext='.mp4'):
     """Decide what to do with a video.
 
     Returns a dict with keys:
-        action: 'encode', 'skip_tiny', 'skip_tagged'
+        action: 'encode', 'skip_tagged'
         target_cq: int or None
         downscale_1080p: bool
         reason: human-readable explanation
@@ -61,7 +61,7 @@ def decide_action(codec, bitrate, width, height, has_v2_tag=False, ext='.mp4'):
         MP4 any 4K                -> encode H.264 + downscale, size gate
         MP4 HEVC non-4K           -> encode H.264, no size gate (compatibility)
         MP4 AV1 non-4K            -> encode H.264, no size gate (compatibility)
-        MP4 H.264 < 0.5 Mbps     -> skip (tiny)
+        MP4 H.264 < 0.5 Mbps     -> encode H.264, no size gate (tag only)
         MP4 H.264 >= 0.5 Mbps    -> encode H.264, size gate
         MP4 VP9/other             -> encode H.264, size gate
     """
@@ -127,11 +127,11 @@ def decide_action(codec, bitrate, width, height, has_v2_tag=False, ext='.mp4'):
             }
         else:
             return {
-                'action': 'skip_tiny',
-                'target_cq': None,
+                'action': 'encode',
+                'target_cq': 30,
                 'downscale_1080p': False,
                 'size_gate': False,
-                'reason': f'H.264 at {bitrate_mbps:.2f} Mbps (too low)',
+                'reason': f'H.264 at {bitrate_mbps:.2f} Mbps (low, tag only)',
             }
 
     if codec_lower == 'hevc':

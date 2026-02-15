@@ -121,20 +121,29 @@ def remux_to_mp4(input_path):
     }
 
 
-def rename_skip(input_path):
-    """Rename a file to {stem}_skip.mp4 to mark it as skipped.
-
-    Returns the new path, or None on failure.
-    """
-    input_path = Path(input_path)
-    skip_path = input_path.parent / f'{input_path.stem}_skip.mp4'
-    if skip_path.exists():
-        skip_path = _unique_path(skip_path)
+def tag_file(file_path):
+    """Add v4 metadata tag to a file via copy remux. Returns True on success."""
+    file_path = Path(file_path)
+    temp_path = file_path.parent / f'.{file_path.stem}.tag.tmp{file_path.suffix}'
+    cmd = [
+        'ffmpeg', '-y',
+        '-i', str(file_path),
+        '-c', 'copy',
+        '-metadata', f'comment={ENCODER_TAG}',
+        str(temp_path),
+    ]
     try:
-        input_path.rename(skip_path)
-        return str(skip_path)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode != 0:
+            _cleanup(temp_path)
+            return False
+        if not temp_path.exists():
+            return False
+        shutil.move(str(temp_path), str(file_path))
+        return True
     except Exception:
-        return None
+        _cleanup(temp_path)
+        return False
 
 
 def build_cmd(input_path, output_path, source_codec, target_cq, scale_filter=None):
@@ -239,7 +248,7 @@ def encode_video(input_path, source_codec, target_cq, scale_filter=None, size_ga
             'error': None,
         }
 
-    stem = input_path.stem.replace('_compressed', '')
+    stem = input_path.stem.replace('_compressed', '').replace('_skip', '')
     final_path = input_path.parent / f'{stem}.mp4'
     if final_path != input_path and final_path.exists():
         final_path = _unique_path(final_path)
