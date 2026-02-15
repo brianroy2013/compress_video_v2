@@ -88,7 +88,7 @@ def remux_to_mp4(input_path):
         error: str (only on failure)
     """
     input_path = Path(input_path)
-    final_path = input_path.parent / f'{input_path.stem}_compressed.mp4'
+    final_path = input_path.parent / f'{input_path.stem}.mp4'
 
     cmd = [
         'ffmpeg', '-y',
@@ -239,14 +239,10 @@ def encode_video(input_path, source_codec, target_cq, scale_filter=None, size_ga
             'error': None,
         }
 
-    # If input already has _compressed in the name, keep the same name
-    # (avoids video_compressed_compressed.mp4)
-    if '_compressed' in input_path.stem:
-        final_path = input_path
-    else:
-        final_path = input_path.parent / f'{input_path.stem}_compressed.mp4'
-        if final_path.exists():
-            final_path = _unique_path(final_path)
+    stem = input_path.stem.replace('_compressed', '')
+    final_path = input_path.parent / f'{stem}.mp4'
+    if final_path != input_path and final_path.exists():
+        final_path = _unique_path(final_path)
 
     return {
         'success': True,

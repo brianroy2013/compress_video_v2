@@ -4,13 +4,13 @@ GPU-accelerated video compression tool using H.264 encoding via NVIDIA NVENC. De
 
 ## How It Works
 
-Instead of a database, the system uses **filename conventions** to track state:
+Instead of a database, the system uses **metadata tags** and **filename conventions** to track state:
 
-| Suffix | Meaning |
-|--------|---------|
-| `_compressed.mp4` | Successfully compressed or converted |
-| `_skip.mp4` | Skipped (already efficient, too small, or no savings from re-encoding) |
-| *(no suffix)* | Not yet processed |
+| Indicator | Meaning |
+|-----------|---------|
+| `compressed_h264_v4` metadata tag | Successfully compressed — output keeps its base name (e.g. `video.avi` → `video.mp4`) |
+| `_skip.mp4` filename suffix | Skipped (already efficient, too small, or no savings from re-encoding) |
+| *(no tag, no suffix)* | Not yet processed |
 
 Re-running is always safe — files with `_skip` in the name are ignored, and files already tagged `compressed_h264_v4` are skipped. Old HEVC `_compressed` files without the new tag will be re-encoded to H.264.
 
