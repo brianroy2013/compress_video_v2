@@ -156,6 +156,13 @@ def _process_work_item(w, stats, total_saved_bytes):
         stats['failed'] += 1
         return total_saved_bytes
 
+    # Re-check tag after claiming — another machine may have just finished this file
+    recheck = encode.ffprobe_info(path)
+    if recheck and encode.ENCODER_TAG in (recheck.get('comment') or ''):
+        print(f'  SKIP: already encoded by another machine')
+        claim.release_claim(str(path))
+        return total_saved_bytes
+
     if action == 'remux':
         # Remux: copy streams into MP4
         t0 = time.time()
@@ -388,17 +395,21 @@ def cmd_status(args):
                 continue
 
             stem = path.stem.lower()
-            if '_compressed' in stem:
-                counts['compressed'] += 1
-                sizes['compressed'] += size
-            elif '_skip' in stem:
+            if '_skip' in stem:
                 counts['skip'] += 1
                 sizes['skip'] += size
             elif claim.is_claimed(str(path)):
                 counts['claimed'] += 1
             else:
-                counts['remaining'] += 1
-                sizes['remaining'] += size
+                # Check metadata tag to distinguish compressed from remaining
+                info = encode.ffprobe_info(path)
+                comment = info.get('comment', '') if info else ''
+                if encode.ENCODER_TAG in comment:
+                    counts['compressed'] += 1
+                    sizes['compressed'] += size
+                else:
+                    counts['remaining'] += 1
+                    sizes['remaining'] += size
 
     total = sum(counts.values())
     print(f'Video files: {total}')
